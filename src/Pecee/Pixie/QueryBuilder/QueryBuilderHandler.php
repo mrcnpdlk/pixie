@@ -2,13 +2,26 @@
 
 namespace Pecee\Pixie\QueryBuilder;
 
+use function call_user_func_array;
+use Closure;
+use function count;
+use function func_get_args;
+use function func_num_args;
+use function in_array;
+use function is_array;
+use function is_bool;
+use function is_int;
+use function is_string;
 use PDO;
+use PDOException;
+use PDOStatement;
 use Pecee\Pixie\Connection;
 use Pecee\Pixie\Event\EventHandler;
 use Pecee\Pixie\Exception;
 use Pecee\Pixie\Exceptions\ColumnNotFoundException;
 use Pecee\Pixie\Exceptions\ConnectionException;
 use Pecee\Pixie\Exceptions\TransactionHaltException;
+use function strtolower;
 
 /**
  * Class QueryBuilderHandler
@@ -68,7 +81,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
      *
      * @var array
      */
-    protected $fetchParameters = [\PDO::FETCH_OBJ];
+    protected $fetchParameters = [PDO::FETCH_OBJ];
 
     /**
      * If true calling from, select etc. will overwrite any existing values from previous calls in query.
@@ -110,356 +123,9 @@ class QueryBuilderHandler implements IQueryBuilderHandler
         $this->connection->getPdoInstance()->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
     }
 
-    /**
-     * Fetch query results as object of specified type
-     *
-     * @param string $className
-     * @param array  $constructorArgs
-     *
-     * @return static
-     */
-    public function asObject(string $className, array $constructorArgs = []): QueryBuilderHandler
+    public function __destruct()
     {
-        return $this->setFetchMode(PDO::FETCH_CLASS, $className, $constructorArgs);
-    }
-
-    /**
-     * Add fetch parameters to the PDO-query.
-     *
-     * @param mixed $parameters ...
-     *
-     * @return static
-     */
-    public function setFetchMode($parameters = null): IQueryBuilderHandler
-    {
-        $this->fetchParameters = \func_get_args();
-
-        return $this;
-    }
-
-    /**
-     * Get count of all the rows for the current query
-     *
-     * @param string $field
-     *
-     * @throws Exception
-     *
-     * @return int
-     */
-    public function count(string $field = '*'): int
-    {
-        return (int)$this->aggregate('count', $field);
-    }
-
-    /**
-     * Performs special queries like COUNT, SUM etc based on the current query.
-     *
-     * @param string $type
-     * @param string $field
-     *
-     * @throws Exception
-     *
-     * @return float
-     */
-    protected function aggregate(string $type, string $field = '*'): float
-    {
-        // Verify that field exists
-        if ('*' !== $field && true === isset($this->statements['selects']) && false === \in_array($field, $this->statements['selects'], true)) {
-            throw new ColumnNotFoundException(sprintf('Failed to count query - the column %s hasn\'t been selected in the query.', $field));
-        }
-
-        if (false === isset($this->statements['tables'])) {
-            throw new Exception('No table selected');
-        }
-
-        $count = $this
-            ->table($this->subQuery($this, 'count'))
-            ->select([$this->raw(sprintf('%s(%s) AS `field`', strtoupper($type), $field))])
-            ->first();
-
-        return true === isset($count->field) ? (float)$count->field : 0;
-    }
-
-    /**
-     * Get the alias for the current query
-     *
-     * @return string|null
-     */
-    public function getAlias(): ?string
-    {
-        return true === isset($this->statements['aliases']) ? array_values($this->statements['aliases'])[0] : null;
-    }
-
-    /**
-     * Get the table-name for the current query
-     *
-     * @return string|null
-     */
-    public function getTable(): ?string
-    {
-        if (true === isset($this->statements['tables'])) {
-            $table = array_values($this->statements['tables'])[0];
-            if (false === $table instanceof Raw) {
-                return $table;
-            }
-        }
-
-        return null;
-    }
-
-    /**
-     * Returns the first row
-     *
-     * @throws Exception
-     *
-     * @return \stdClass|string|null
-     */
-    public function first()
-    {
-        $result = $this->limit(1)->get();
-
-        return (null !== $result && 0 !== \count($result)) ? $result[0] : null;
-    }
-
-    /**
-     * Get all rows
-     *
-     * @throws Exception
-     *
-     * @return array
-     */
-    public function get(): array
-    {
-        /**
-         * @var $queryObject   \Pecee\Pixie\QueryBuilder\QueryObject
-         * @var $executionTime float
-         * @var $start         float
-         * @var $result        array
-         */
-        $queryObject = $this->getQuery();
-        $this->connection->setLastQuery($queryObject);
-
-        $this->fireEvents(EventHandler::EVENT_BEFORE_SELECT, $queryObject);
-
-        $executionTime = 0;
-        $startTime     = microtime(true);
-
-        if (null === $this->pdoStatement) {
-            [$this->pdoStatement, $executionTime] = $this->statement(
-                $queryObject->getSql(),
-                $queryObject->getBindings()
-            );
-        }
-
-        $result             = \call_user_func_array([$this->pdoStatement, 'fetchAll'], $this->fetchParameters);
-        $this->pdoStatement = null;
-
-        $executionTime += microtime(true) - $startTime;
-
-        $this->fireEvents(EventHandler::EVENT_AFTER_SELECT, $queryObject, [
-            'execution_time' => $executionTime,
-        ]);
-
-        return $result;
-    }
-
-    /**
-     * Returns Query-object.
-     *
-     * @param string           $type
-     * @param array|mixed|null $arguments
-     *
-     * @throws Exception
-     *
-     * @return QueryObject
-     */
-    public function getQuery(string $type = 'select', ...$arguments): QueryObject
-    {
-        $allowedTypes = [
-            'select',
-            'insert',
-            'insertignore',
-            'replace',
-            'delete',
-            'update',
-            'criteriaonly',
-        ];
-
-        if (false === \in_array(strtolower($type), $allowedTypes, true)) {
-            throw new Exception($type . ' is not a known type.', 1);
-        }
-
-        $queryArr = $this->adapterInstance->$type($this->statements, ...$arguments);
-
-        return new QueryObject($queryArr['sql'], $queryArr['bindings'], $this->getConnection());
-    }
-
-    /**
-     * Get connection object
-     *
-     * @return Connection
-     */
-    public function getConnection(): Connection
-    {
-        return $this->connection;
-    }
-
-    /**
-     * Set connection object
-     *
-     * @param Connection $connection
-     *
-     * @return static
-     */
-    public function setConnection(Connection $connection): IQueryBuilderHandler
-    {
-        $this->connection = $connection;
-
-        return $this;
-    }
-
-    /**
-     * Fires event by given event name
-     *
-     * @param string      $name
-     * @param QueryObject $queryObject
-     * @param array       $eventArguments
-     *
-     * @return void
-     */
-    public function fireEvents(string $name, QueryObject $queryObject, array $eventArguments = []): void
-    {
-        $this->connection->getEventHandler()->fireEvents($name, $queryObject, $this, $eventArguments);
-    }
-
-    /**
-     * Execute statement
-     *
-     * @param string $sql
-     * @param array  $bindings
-     *
-     * @throws \Pecee\Pixie\Exceptions\TableNotFoundException
-     * @throws \Pecee\Pixie\Exceptions\ConnectionException
-     * @throws \Pecee\Pixie\Exceptions\ColumnNotFoundException
-     * @throws \Pecee\Pixie\Exception
-     * @throws \Pecee\Pixie\Exceptions\DuplicateColumnException
-     * @throws \Pecee\Pixie\Exceptions\DuplicateEntryException
-     * @throws \Pecee\Pixie\Exceptions\DuplicateKeyException
-     * @throws \Pecee\Pixie\Exceptions\ForeignKeyException
-     * @throws \Pecee\Pixie\Exceptions\NotNullException
-     *
-     * @return array PDOStatement and execution time as float
-     */
-    public function statement(string $sql, array $bindings = []): array
-    {
-        try {
-            $startTime    = microtime(true);
-            $pdoStatement = $this->pdo()->prepare($sql);
-
-            /*
-             * NOTE:
-             * PHP 5.6 & 7 bug: https://bugs.php.net/bug.php?id=38546
-             * \PDO::PARAM_BOOL is not supported, use \PDO::PARAM_INT instead
-             */
-            foreach ($bindings as $key => $value) {
-                $pdoStatement->bindValue(
-                    \is_int($key) ? $key + 1 : $key,
-                    $value,
-                    $this->parseParameterType($value)
-                );
-            }
-
-            $pdoStatement->execute();
-
-            return [
-                $pdoStatement,
-                microtime(true) - $startTime,
-            ];
-        } catch (\PDOException $e) {
-            throw Exception::create($e, $this->getConnection()->getAdapter()->getQueryAdapterClass(), $this->getLastQuery());
-        }
-    }
-
-    /**
-     * Return PDO instance
-     *
-     * @return PDO
-     */
-    public function pdo(): PDO
-    {
-        return $this->getConnection()->getPdoInstance();
-    }
-
-    /**
-     * Parse parameter type from value
-     *
-     * @param mixed $value
-     *
-     * @return int
-     */
-    protected function parseParameterType($value): int
-    {
-        if (null === $value) {
-            return PDO::PARAM_NULL;
-        }
-
-        if (true === \is_int($value) || true === \is_bool($value)) {
-            return PDO::PARAM_INT;
-        }
-
-        return PDO::PARAM_STR;
-    }
-
-    /**
-     * Get query-object from last executed query.
-     *
-     * @return QueryObject|null
-     */
-    public function getLastQuery(): ?QueryObject
-    {
-        return $this->connection->getLastQuery();
-    }
-
-    /**
-     * Adds LIMIT statement to the current query.
-     *
-     * @param int $limit
-     *
-     * @return static
-     */
-    public function limit(int $limit): IQueryBuilderHandler
-    {
-        $this->statements['limit'] = $limit;
-
-        return $this;
-    }
-
-    /**
-     * Adds fields to select on the current query (defaults is all).
-     * You can use key/value array to create alias.
-     * Sub-queries and raw-objects are also supported.
-     *
-     * Example: ['field' => 'alias'] will become `field` AS `alias`
-     *
-     * @param string|array $fields,...
-     *
-     * @return static
-     */
-    public function select($fields): IQueryBuilderHandler
-    {
-        if (false === \is_array($fields)) {
-            $fields = \func_get_args();
-        }
-
-        $fields = $this->addTablePrefix($fields);
-
-        if (true === $this->overwriteEnabled) {
-            $this->statements['selects'] = $fields;
-        } else {
-            $this->addStatement('selects', $fields);
-        }
-
-        return $this;
+        $this->close();
     }
 
     /**
@@ -480,7 +146,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
         // If supplied value is not an array then make it one
 
         $single = false;
-        if (false === \is_array($values)) {
+        if (false === is_array($values)) {
             $values = [$values];
 
             // We had single value, so should return a single value
@@ -491,7 +157,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
 
         foreach ($values as $key => $value) {
             // It's a raw query, just add it to our return array and continue next
-            if ($value instanceof Raw || $value instanceof \Closure) {
+            if ($value instanceof Raw || $value instanceof Closure) {
                 $return[$key] = $value;
                 continue;
             }
@@ -499,7 +165,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
             // If key is not integer, it is likely a alias mapping, so we need to change prefix target
             $target = &$value;
 
-            if (false === \is_int($key)) {
+            if (false === is_int($key)) {
                 $target = &$key;
             }
 
@@ -515,100 +181,11 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Add new statement to statement-list
-     *
-     * @param string       $key
-     * @param string|array $value
-     *
-     * @return void
-     */
-    protected function addStatement(string $key, $value): void
-    {
-        if (false === array_key_exists($key, $this->statements)) {
-            $this->statements[$key] = (array)$value;
-        } else {
-            $this->statements[$key] = array_merge($this->statements[$key], (array)$value);
-        }
-    }
-
-    /**
-     * Sets the table that the query is using
-     * Note: to remove a table set the $tables argument to null.
-     *
-     * @param string|array|null $tables Single table or multiple tables as an array or as multiple parameters
-     *
-     * @throws Exception
-     *
-     * ```
-     * Examples:
-     *  - basic usage
-     * ->table('table_one')
-     * ->table(['table_one'])
-     *
-     *  - with aliasing
-     * ->table(['table_one' => 'one'])
-     * ->table($qb->raw('table_one as one'))
-     * ```
-     *
-     * @return static
-     */
-    public function table($tables = null): IQueryBuilderHandler
-    {
-        if (null === $tables) {
-            return $this->from($tables);
-        }
-
-        if (false === \is_array($tables)) {
-            // Because a single table is converted to an array anyways, this makes sense.
-            $tables = \func_get_args();
-        }
-
-        return $this->newQuery()->from($tables);
-    }
-
-    /**
-     * Adds FROM statement to the current query.
-     *
-     * @param string|array|null $tables Single table or multiple tables as an array or as multiple parameters
-     *
-     * @return static
-     */
-    public function from($tables = null): IQueryBuilderHandler
-    {
-        if (null === $tables) {
-            $this->statements['tables'] = null;
-
-            return $this;
-        }
-
-        if (false === \is_array($tables)) {
-            $tables = \func_get_args();
-        }
-
-        $tTables = [];
-
-        foreach ((array)$tables as $key => $value) {
-            if (true === \is_string($key)) {
-                $this->alias($value, $key);
-                $tTables[] = $key;
-                continue;
-            }
-
-            $tTables[] = $value;
-        }
-
-        $tTables                    = $this->addTablePrefix($tTables, false);
-        $this->statements['tables'] = $tTables;
-
-        return $this;
-    }
-
-    /**
      * Add or change table alias
      * Example: table AS alias
      *
-     * @param string $alias
-     * @param string $table
+     * @param string      $alias
+     * @param string|null $table
      *
      * @return static
      */
@@ -620,78 +197,22 @@ class QueryBuilderHandler implements IQueryBuilderHandler
             $table = $this->tablePrefix . $table;
         }
 
-        $this->statements['aliases'][$table] = \strtolower($alias);
+        $this->statements['aliases'][$table] = strtolower($alias);
 
         return $this;
     }
 
     /**
-     * Creates and returns new query.
+     * Fetch query results as object of specified type
      *
-     * @throws Exception
+     * @param string $className
+     * @param array  $constructorArgs
      *
      * @return static
      */
-    public function newQuery(): IQueryBuilderHandler
+    public function asObject(string $className, array $constructorArgs = []): QueryBuilderHandler
     {
-        return new static($this->connection);
-    }
-
-    /**
-     * Performs new sub-query.
-     * Call this method when you want to add a new sub-query in your where etc.
-     *
-     * @param QueryBuilderHandler $queryBuilder
-     * @param string|null         $alias
-     *
-     * @throws Exception
-     *
-     * @return Raw
-     */
-    public function subQuery(QueryBuilderHandler $queryBuilder, $alias = null): Raw
-    {
-        $sql = '(' . $queryBuilder->getQuery()->getRawSql() . ')';
-        if (null !== $alias) {
-            $sql = $sql . ' AS ' . $this->adapterInstance->wrapSanitizer($alias);
-        }
-
-        return $queryBuilder->raw($sql);
-    }
-
-    /**
-     * Adds a raw string to the current query.
-     * This query will be ignored from any parsing or formatting by the Query builder
-     * and should be used in conjunction with other statements in the query.
-     *
-     * For example: $qb->where('result', '>', $qb->raw('COUNT(`score`)));
-     *
-     * @param string           $value
-     * @param array|mixed|null $bindings ...
-     *
-     * @return Raw
-     */
-    public function raw(string $value, $bindings = null): Raw
-    {
-        if (false === \is_array($bindings)) {
-            $bindings = \func_get_args();
-            array_shift($bindings);
-        }
-
-        return new Raw($value, $bindings);
-    }
-
-    /**
-     * Get the sum for a field in the current query
-     *
-     * @param string $field
-     *
-     * @throws Exception
-     *
-     * @return float
-     */
-    public function sum(string $field): float
-    {
-        return $this->aggregate('sum', $field);
+        return $this->setFetchMode(PDO::FETCH_CLASS, $className, $constructorArgs);
     }
 
     /**
@@ -709,43 +230,38 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Get the minimum for a field in the current query
-     *
-     * @param string $field
-     *
-     * @throws Exception
-     *
-     * @return float
+     * Close connection
      */
-    public function min(string $field): float
+    public function close(): void
     {
-        return $this->aggregate('min', $field);
+        $this->pdoStatement = null;
+        $this->connection   = null;
     }
 
     /**
-     * Get the maximum for a field in the current query
+     * Get count of all the rows for the current query
      *
      * @param string $field
      *
      * @throws Exception
      *
-     * @return float
+     * @return int
      */
-    public function max(string $field): float
+    public function count(string $field = '*'): int
     {
-        return $this->aggregate('max', $field);
+        return (int)$this->aggregate('count', $field);
     }
 
     /**
      * Forms delete on the current query.
      *
-     * @var array|null
-     *
      * @throws Exception
      *
      * @return \PDOStatement
+     *
+     * @var array|null
      */
-    public function delete(array $columns = null): \PDOStatement
+    public function delete(array $columns = null): PDOStatement
     {
         /* @var $response \PDOStatement */
         $queryObject = $this->getQuery('delete', $columns);
@@ -778,48 +294,6 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Adds WHERE statement to the current query.
-     *
-     * @param string|Raw|\Closure     $key
-     * @param string|null             $operator
-     * @param mixed|Raw|\Closure|null $value
-     *
-     * @return static
-     */
-    public function where($key, $operator = null, $value = null): IQueryBuilderHandler
-    {
-        // If two params are given then assume operator is =
-        if (2 === \func_num_args()) {
-            $value    = $operator;
-            $operator = '=';
-        }
-
-        if (true === \is_bool($value)) {
-            $value = (int)$value;
-        }
-
-        return $this->whereHandler($key, $operator, $value);
-    }
-
-    /**
-     * Handles where statements
-     *
-     * @param string|Raw|\Closure      $key
-     * @param string|null              $operator
-     * @param string|Raw|\Closure|null $value
-     * @param string                   $joiner
-     *
-     * @return static
-     */
-    protected function whereHandler($key, ?string $operator = null, $value = null, $joiner = 'AND'): IQueryBuilderHandler
-    {
-        $key                          = $this->addTablePrefix($key);
-        $this->statements['wheres'][] = compact('key', 'operator', 'value', 'joiner');
-
-        return $this;
-    }
-
-    /**
      * Find all by field name and value
      *
      * @param string           $fieldName
@@ -832,6 +306,172 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     public function findAll(string $fieldName, $value): array
     {
         return $this->where($fieldName, '=', $value)->get();
+    }
+
+    /**
+     * Fires event by given event name
+     *
+     * @param string      $name
+     * @param QueryObject $queryObject
+     * @param array       $eventArguments
+     *
+     * @return void
+     */
+    public function fireEvents(string $name, QueryObject $queryObject, array $eventArguments = []): void
+    {
+        $this->connection->getEventHandler()->fireEvents($name, $queryObject, $this, $eventArguments);
+    }
+
+    /**
+     * Returns the first row
+     *
+     * @throws Exception
+     *
+     * @return \stdClass|string|null
+     */
+    public function first()
+    {
+        $result = $this->limit(1)->get();
+
+        return (null !== $result && 0 !== count($result)) ? $result[0] : null;
+    }
+
+    /**
+     * Adds FROM statement to the current query.
+     *
+     * @param string|array|null $tables Single table or multiple tables as an array or as multiple parameters
+     *
+     * @return static
+     */
+    public function from($tables = null): IQueryBuilderHandler
+    {
+        if (null === $tables) {
+            $this->statements['tables'] = null;
+
+            return $this;
+        }
+
+        if (false === is_array($tables)) {
+            $tables = func_get_args();
+        }
+
+        $tTables = [];
+
+        foreach ((array)$tables as $key => $value) {
+            if (true === is_string($key)) {
+                $this->alias($value, $key);
+                $tTables[] = $key;
+                continue;
+            }
+
+            $tTables[] = $value;
+        }
+
+        $tTables                    = $this->addTablePrefix($tTables, false);
+        $this->statements['tables'] = $tTables;
+
+        return $this;
+    }
+
+    /**
+     * Get all rows
+     *
+     * @throws Exception
+     *
+     * @return array
+     */
+    public function get(): array
+    {
+        /**
+         * @var $queryObject   \Pecee\Pixie\QueryBuilder\QueryObject
+         * @var $executionTime float
+         * @var $start         float
+         * @var $result        array
+         */
+        $queryObject = $this->getQuery();
+        $this->connection->setLastQuery($queryObject);
+
+        $this->fireEvents(EventHandler::EVENT_BEFORE_SELECT, $queryObject);
+
+        $executionTime = 0;
+        $startTime     = microtime(true);
+
+        if (null === $this->pdoStatement) {
+            [$this->pdoStatement, $executionTime] = $this->statement(
+                $queryObject->getSql(),
+                $queryObject->getBindings()
+            );
+        }
+
+        $result             = call_user_func_array([$this->pdoStatement, 'fetchAll'], $this->fetchParameters);
+        $this->pdoStatement = null;
+
+        $executionTime += microtime(true) - $startTime;
+
+        $this->fireEvents(EventHandler::EVENT_AFTER_SELECT, $queryObject, [
+            'execution_time' => $executionTime,
+        ]);
+
+        return $result;
+    }
+
+    /**
+     * Get the alias for the current query
+     *
+     * @return string|null
+     */
+    public function getAlias(): ?string
+    {
+        return true === isset($this->statements['aliases']) ? array_values($this->statements['aliases'])[0] : null;
+    }
+
+    /**
+     * Returns all columns in current query
+     *
+     * @return array
+     */
+    public function getColumns(): array
+    {
+        $tSelects = true === isset($this->statements['selects']) ? $this->statements['selects'] : [];
+        $tColumns = [];
+        foreach ($tSelects as $key => $value) {
+            if (is_string($value)) {
+                if (is_int($key)) {
+                    $tElements = explode('.', $value);
+                    if (!in_array('*', $tElements, true)) {
+                        $tColumns[$tElements[1] ?? $tElements[0]] = $value;
+                    }
+                } elseif (is_string($key)) {
+                    $tColumns[$value] = $key;
+                }
+            }
+        }
+
+        return $tColumns;
+    }
+
+    /**
+     * Get connection object
+     *
+     * @return Connection
+     */
+    public function getConnection(): Connection
+    {
+        return $this->connection;
+    }
+
+    /**
+     * Set connection object
+     *
+     * @param Connection $connection
+     *
+     * @return static
+     */
+    public function setConnection(Connection $connection): IQueryBuilderHandler
+    {
+        $this->connection = $connection;
+
+        return $this;
     }
 
     /**
@@ -848,6 +488,86 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
+     * Get query-object from last executed query.
+     *
+     * @return QueryObject|null
+     */
+    public function getLastQuery(): ?QueryObject
+    {
+        return $this->connection->getLastQuery();
+    }
+
+    /**
+     * Returns Query-object.
+     *
+     * @param string           $type
+     * @param array|mixed|null $arguments
+     *
+     * @throws Exception
+     *
+     * @return QueryObject
+     */
+    public function getQuery(string $type = 'select', ...$arguments): QueryObject
+    {
+        $allowedTypes = [
+            'select',
+            'insert',
+            'insertignore',
+            'replace',
+            'delete',
+            'update',
+            'criteriaonly',
+        ];
+
+        if (false === in_array(strtolower($type), $allowedTypes, true)) {
+            throw new Exception($type . ' is not a known type.', 1);
+        }
+
+        $queryArr = $this->adapterInstance->$type($this->statements, ...$arguments);
+
+        return new QueryObject($queryArr['sql'], $queryArr['bindings'], $this->getConnection());
+    }
+
+    /**
+     * Returns statements
+     *
+     * @return array
+     */
+    public function getStatements(): array
+    {
+        return $this->statements;
+    }
+
+    /**
+     * @param array $statements
+     *
+     * @return static $this
+     */
+    public function setStatements(array $statements)
+    {
+        $this->statements = $statements;
+
+        return $this;
+    }
+
+    /**
+     * Get the table-name for the current query
+     *
+     * @return string|null
+     */
+    public function getTable(): ?string
+    {
+        if (true === isset($this->statements['tables'])) {
+            $table = array_values($this->statements['tables'])[0];
+            if (false === $table instanceof Raw) {
+                return $table;
+            }
+        }
+
+        return null;
+    }
+
+    /**
      * Adds GROUP BY to the current query.
      *
      * @param string|Raw|\Closure|array $field
@@ -860,11 +580,29 @@ class QueryBuilderHandler implements IQueryBuilderHandler
             $field = $this->addTablePrefix($field);
         }
 
-        if (true === \is_array($field)) {
+        if (true === is_array($field)) {
             $this->statements['groupBys'] = array_merge($this->statements['groupBys'], $field);
         } else {
             $this->statements['groupBys'][] = $field;
         }
+
+        return $this;
+    }
+
+    /**
+     * Adds HAVING statement to the current query.
+     *
+     * @param string|Raw|\Closure $key
+     * @param string|mixed        $operator
+     * @param string|mixed        $value
+     * @param string              $joiner
+     *
+     * @return static
+     */
+    public function having($key, $operator, $value, $joiner = 'AND'): IQueryBuilderHandler
+    {
+        $key                           = $this->addTablePrefix($key);
+        $this->statements['havings'][] = compact('key', 'operator', 'value', 'joiner');
 
         return $this;
     }
@@ -884,6 +622,58 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     public function innerJoin($table, $key, $operator = null, $value = null): IQueryBuilderHandler
     {
         return $this->join($table, $key, $operator, $value, 'inner');
+    }
+
+    /**
+     * Insert key/value array
+     *
+     * @param array $data
+     *
+     * @throws Exception
+     *
+     * @return array|string
+     */
+    public function insert(array $data)
+    {
+        return $this->doInsert($data, 'insert');
+    }
+
+    /**
+     * Insert with ignore key/value array
+     *
+     * @param array $data
+     *
+     * @throws Exception
+     *
+     * @return array|string
+     */
+    public function insertIgnore(array $data)
+    {
+        return $this->doInsert($data, 'insertignore');
+    }
+
+    /**
+     * Returns boolean value indicating if overwriting is enabled or disabled in QueryBuilderHandler.
+     *
+     * @return bool
+     */
+    public function isOverwriteEnabled(): bool
+    {
+        return $this->overwriteEnabled;
+    }
+
+    /**
+     * If enabled calling from, select etc. will overwrite any existing values from previous calls in query.
+     *
+     * @param bool $enabled
+     *
+     * @return static
+     */
+    public function setOverwriteEnabled(bool $enabled)
+    {
+        $this->overwriteEnabled = $enabled;
+
+        return $this;
     }
 
     /**
@@ -927,7 +717,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
              * Build a new JoinBuilder class, keep it by reference so any changes made
              * in the closure should reflect here
              */
-            if (false === $key instanceof \Closure) {
+            if (false === $key instanceof Closure) {
                 $key = function (JoinBuilder $joinBuilder) use ($key, $operator, $value) {
                     $joinBuilder->on($key, $operator, $value);
                 };
@@ -950,124 +740,6 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Insert with ignore key/value array
-     *
-     * @param array $data
-     *
-     * @throws Exception
-     *
-     * @return array|string
-     */
-    public function insertIgnore(array $data)
-    {
-        return $this->doInsert($data, 'insertignore');
-    }
-
-    /**
-     * Performs insert
-     *
-     * @param array  $data
-     * @param string $type
-     *
-     * @throws Exception
-     *
-     * @return array|string|null
-     */
-    private function doInsert(array $data, string $type)
-    {
-        // Insert single item
-
-        if (false === \is_array(current($data))) {
-            $queryObject = $this->getQuery($type, $data);
-
-            $this->connection->setLastQuery($queryObject);
-
-            $this->fireEvents(EventHandler::EVENT_BEFORE_INSERT, $queryObject);
-            /**
-             * @var $result        \PDOStatement
-             * @var $executionTime float
-             */
-            [$result, $executionTime] = $this->statement($queryObject->getSql(), $queryObject->getBindings());
-
-            $insertId = 1 === $result->rowCount() ? $this->pdo()->lastInsertId() : null;
-            $this->fireEvents(EventHandler::EVENT_AFTER_INSERT, $queryObject, [
-                'insert_id'      => $insertId,
-                'execution_time' => $executionTime,
-            ]);
-
-            return $insertId;
-        }
-
-        $insertIds = [];
-
-        // If the current batch insert is not in a transaction, we create one...
-
-        if (false === $this->pdo()->inTransaction()) {
-            $this->transaction(function (Transaction $transaction) use (&$insertIds, $data, $type) {
-                foreach ($data as $subData) {
-                    $insertIds[] = $transaction->doInsert($subData, $type);
-                }
-            });
-
-            return $insertIds;
-        }
-
-        // Otherwise insert one by one...
-        foreach ($data as $subData) {
-            $insertIds[] = $this->doInsert($subData, $type);
-        }
-
-        return $insertIds;
-    }
-
-    /**
-     * Performs the transaction
-     *
-     * @param \Closure $callback
-     *
-     * @throws Exception
-     *
-     * @return Transaction
-     */
-    public function transaction(\Closure $callback): Transaction
-    {
-        /**
-         * Get the Transaction class
-         *
-         * @var \Pecee\Pixie\QueryBuilder\Transaction $queryTransaction
-         *
-         * @throws \Exception
-         */
-        $queryTransaction             = new Transaction($this->connection);
-        $queryTransaction->statements = $this->statements;
-
-        try {
-            // Begin the PDO transaction
-            if (false === $this->pdo()->inTransaction()) {
-                $this->pdo()->beginTransaction();
-            }
-
-            // Call closure - this callback will return TransactionHaltException if user has already committed the transaction
-            $callback($queryTransaction);
-
-            // If no errors have been thrown or the transaction wasn't completed within the closure, commit the changes
-            $this->pdo()->commit();
-        } catch (TransactionHaltException $e) {
-            // Commit or rollback behavior has been triggered in the closure
-            return $queryTransaction;
-        } catch (\Exception $e) {
-            // Something went wrong. Rollback and throw Exception
-            if (true === $this->pdo()->inTransaction()) {
-                $this->pdo()->rollBack();
-            }
-
-            throw Exception::create($e, $this->getConnection()->getAdapter()->getQueryAdapterClass(), $this->getLastQuery());
-        }
-
-        return $queryTransaction;
-    }
-
-    /**
      * @param string|Raw|\Closure $table
      * @param string|array        $fields
      * @param string              $joinType
@@ -1078,7 +750,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
      */
     public function joinUsing($table, $fields, $joinType = '')
     {
-        if (false === \is_array($fields)) {
+        if (false === is_array($fields)) {
             $fields = [$fields];
         }
 
@@ -1111,6 +783,60 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     public function leftJoin($table, $key, $operator = null, $value = null): IQueryBuilderHandler
     {
         return $this->join($table, $key, $operator, $value, 'left');
+    }
+
+    /**
+     * Adds LIMIT statement to the current query.
+     *
+     * @param int $limit
+     *
+     * @return static
+     */
+    public function limit(int $limit): IQueryBuilderHandler
+    {
+        $this->statements['limit'] = $limit;
+
+        return $this;
+    }
+
+    /**
+     * Get the maximum for a field in the current query
+     *
+     * @param string $field
+     *
+     * @throws Exception
+     *
+     * @return float
+     */
+    public function max(string $field): float
+    {
+        return $this->aggregate('max', $field);
+    }
+
+    /**
+     * Get the minimum for a field in the current query
+     *
+     * @param string $field
+     *
+     * @throws Exception
+     *
+     * @return float
+     */
+    public function min(string $field): float
+    {
+        return $this->aggregate('min', $field);
+    }
+
+    /**
+     * Creates and returns new query.
+     *
+     * @throws Exception
+     *
+     * @return static
+     */
+    public function newQuery(): IQueryBuilderHandler
+    {
+        return new static($this->connection);
     }
 
     /**
@@ -1156,24 +882,6 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Adds HAVING statement to the current query.
-     *
-     * @param string|Raw|\Closure $key
-     * @param string|mixed        $operator
-     * @param string|mixed        $value
-     * @param string              $joiner
-     *
-     * @return static
-     */
-    public function having($key, $operator, $value, $joiner = 'AND'): IQueryBuilderHandler
-    {
-        $key                           = $this->addTablePrefix($key);
-        $this->statements['havings'][] = compact('key', 'operator', 'value', 'joiner');
-
-        return $this;
-    }
-
-    /**
      * Adds OR WHERE statement to the current query.
      *
      * @param string|Raw|\Closure     $key
@@ -1185,7 +893,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     public function orWhere($key, $operator = null, $value = null): IQueryBuilderHandler
     {
         // If two params are given then assume operator is =
-        if (2 === \func_num_args()) {
+        if (2 === func_num_args()) {
             $value    = $operator;
             $operator = '=';
         }
@@ -1232,7 +940,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     public function orWhereNot($key, $operator = null, $value = null): IQueryBuilderHandler
     {
         // If two params are given then assume operator is =
-        if (2 === \func_num_args()) {
+        if (2 === func_num_args()) {
             $value    = $operator;
             $operator = '=';
         }
@@ -1266,23 +974,6 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Handles WHERE NULL statements.
-     *
-     * @param string|Raw|\Closure $key
-     * @param string              $prefix
-     * @param string              $operator
-     *
-     * @return static
-     */
-    protected function whereNullHandler($key, string $prefix = '', string $operator = ''): IQueryBuilderHandler
-    {
-        $key    = $this->adapterInstance->wrapSanitizer($this->addTablePrefix($key));
-        $prefix = ('' !== $prefix) ? $prefix . ' ' : $prefix;
-
-        return $this->{$operator . 'Where'}($this->raw("$key IS {$prefix}null"));
-    }
-
-    /**
      * Adds OR WHERE NULL statement to the current query.
      *
      * @param string|Raw|\Closure $key
@@ -1304,7 +995,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
      */
     public function orderBy($fields, string $direction = 'ASC'): IQueryBuilderHandler
     {
-        if (false === \is_array($fields)) {
+        if (false === is_array($fields)) {
             $fields = [$fields];
         }
 
@@ -1312,7 +1003,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
             $field = $key;
             $type  = $value;
 
-            if (true === \is_int($key)) {
+            if (true === is_int($key)) {
                 $field = $value;
                 $type  = $direction;
             }
@@ -1325,6 +1016,16 @@ class QueryBuilderHandler implements IQueryBuilderHandler
         }
 
         return $this;
+    }
+
+    /**
+     * Return PDO instance
+     *
+     * @return PDO
+     */
+    public function pdo(): PDO
+    {
+        return $this->getConnection()->getPdoInstance();
     }
 
     /**
@@ -1356,6 +1057,28 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
+     * Adds a raw string to the current query.
+     * This query will be ignored from any parsing or formatting by the Query builder
+     * and should be used in conjunction with other statements in the query.
+     *
+     * For example: $qb->where('result', '>', $qb->raw('COUNT(`score`)));
+     *
+     * @param string           $value
+     * @param array|mixed|null $bindings ...
+     *
+     * @return Raw
+     */
+    public function raw(string $value, $bindings = null): Raw
+    {
+        if (false === is_array($bindings)) {
+            $bindings = func_get_args();
+            array_shift($bindings);
+        }
+
+        return new Raw($value, $bindings);
+    }
+
+    /**
      * Register new event
      *
      * @param string      $name
@@ -1364,7 +1087,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
      *
      * @return void
      */
-    public function registerEvent(string $name, ?string $table = null, \Closure $action): void
+    public function registerEvent(string $name, ?string $table = null, Closure $action): void
     {
         $this->connection->getEventHandler()->registerEvent($name, $table, $action);
     }
@@ -1414,6 +1137,34 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
+     * Adds fields to select on the current query (defaults is all).
+     * You can use key/value array to create alias.
+     * Sub-queries and raw-objects are also supported.
+     *
+     * Example: ['field' => 'alias'] will become `field` AS `alias`
+     *
+     * @param string|array $fields,...
+     *
+     * @return static
+     */
+    public function select($fields): IQueryBuilderHandler
+    {
+        if (false === is_array($fields)) {
+            $fields = func_get_args();
+        }
+
+        $fields = $this->addTablePrefix($fields);
+
+        if (true === $this->overwriteEnabled) {
+            $this->statements['selects'] = $fields;
+        } else {
+            $this->addStatement('selects', $fields);
+        }
+
+        return $this;
+    }
+
+    /**
      * Performs select distinct on the current query.
      *
      * @param string|Raw|\Closure|array $fields
@@ -1432,6 +1183,185 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
+     * Add fetch parameters to the PDO-query.
+     *
+     * @param mixed $parameters ...
+     *
+     * @return static
+     */
+    public function setFetchMode($parameters = null): IQueryBuilderHandler
+    {
+        $this->fetchParameters = func_get_args();
+
+        return $this;
+    }
+
+    /**
+     * Execute statement
+     *
+     * @param string $sql
+     * @param array  $bindings
+     *
+     * @throws \Pecee\Pixie\Exceptions\TableNotFoundException
+     * @throws \Pecee\Pixie\Exceptions\ConnectionException
+     * @throws \Pecee\Pixie\Exceptions\ColumnNotFoundException
+     * @throws \Pecee\Pixie\Exception
+     * @throws \Pecee\Pixie\Exceptions\DuplicateColumnException
+     * @throws \Pecee\Pixie\Exceptions\DuplicateEntryException
+     * @throws \Pecee\Pixie\Exceptions\DuplicateKeyException
+     * @throws \Pecee\Pixie\Exceptions\ForeignKeyException
+     * @throws \Pecee\Pixie\Exceptions\NotNullException
+     *
+     * @return array PDOStatement and execution time as float
+     */
+    public function statement(string $sql, array $bindings = []): array
+    {
+        try {
+            $startTime    = microtime(true);
+            $pdoStatement = $this->pdo()->prepare($sql);
+
+            /*
+             * NOTE:
+             * PHP 5.6 & 7 bug: https://bugs.php.net/bug.php?id=38546
+             * \PDO::PARAM_BOOL is not supported, use \PDO::PARAM_INT instead
+             */
+            foreach ($bindings as $key => $value) {
+                $pdoStatement->bindValue(
+                    is_int($key) ? $key + 1 : $key,
+                    $value,
+                    $this->parseParameterType($value)
+                );
+            }
+
+            $pdoStatement->execute();
+
+            return [
+                $pdoStatement,
+                microtime(true) - $startTime,
+            ];
+        } catch (PDOException $e) {
+            throw Exception::create($e, $this->getConnection()->getAdapter()->getQueryAdapterClass(), $this->getLastQuery());
+        }
+    }
+
+    /**
+     * Performs new sub-query.
+     * Call this method when you want to add a new sub-query in your where etc.
+     *
+     * @param QueryBuilderHandler $queryBuilder
+     * @param string|null         $alias
+     *
+     * @throws Exception
+     *
+     * @return Raw
+     */
+    public function subQuery(QueryBuilderHandler $queryBuilder, $alias = null): Raw
+    {
+        $sql = '(' . $queryBuilder->getQuery()->getRawSql() . ')';
+        if (null !== $alias) {
+            $sql = $sql . ' AS ' . $this->adapterInstance->wrapSanitizer($alias);
+        }
+
+        return $queryBuilder->raw($sql);
+    }
+
+    /**
+     * Get the sum for a field in the current query
+     *
+     * @param string $field
+     *
+     * @throws Exception
+     *
+     * @return float
+     */
+    public function sum(string $field): float
+    {
+        return $this->aggregate('sum', $field);
+    }
+
+    /**
+     * Sets the table that the query is using
+     * Note: to remove a table set the $tables argument to null.
+     *
+     * @param string|array|null $tables Single table or multiple tables as an array or as multiple parameters
+     *
+     * @throws Exception
+     *
+     * ```
+     * Examples:
+     *  - basic usage
+     * ->table('table_one')
+     * ->table(['table_one'])
+     *
+     *  - with aliasing
+     * ->table(['table_one' => 'one'])
+     * ->table($qb->raw('table_one as one'))
+     * ```
+     *
+     * @return static
+     */
+    public function table($tables = null): IQueryBuilderHandler
+    {
+        if (null === $tables) {
+            return $this->from($tables);
+        }
+
+        if (false === is_array($tables)) {
+            // Because a single table is converted to an array anyways, this makes sense.
+            $tables = func_get_args();
+        }
+
+        return $this->newQuery()->from($tables);
+    }
+
+    /**
+     * Performs the transaction
+     *
+     * @param \Closure $callback
+     *
+     * @throws Exception
+     *
+     * @return Transaction
+     */
+    public function transaction(Closure $callback): Transaction
+    {
+        /**
+         * Get the Transaction class
+         *
+         * @throws \Exception
+         *
+         * @var \Pecee\Pixie\QueryBuilder\Transaction $queryTransaction
+         */
+        $queryTransaction             = new Transaction($this->connection);
+        $queryTransaction->statements = $this->statements;
+
+        try {
+            // Begin the PDO transaction
+            if (false === $this->pdo()->inTransaction()) {
+                $this->pdo()->beginTransaction();
+            }
+
+            // Call closure - this callback will return TransactionHaltException if user has already committed the transaction
+            $callback($queryTransaction);
+
+            // If no errors have been thrown or the transaction wasn't completed within the closure, commit the changes
+            $this->pdo()->commit();
+        } catch (TransactionHaltException $e) {
+            // Commit or rollback behavior has been triggered in the closure
+            return $queryTransaction;
+        } catch (\Exception $e) {
+            // Something went wrong. Rollback and throw Exception
+            if (true === $this->pdo()->inTransaction()) {
+                $this->pdo()->rollBack();
+            }
+
+            throw Exception::create($e, $this->getConnection()->getAdapter()->getQueryAdapterClass(), $this->getLastQuery());
+        }
+
+        return $queryTransaction;
+    }
+
+    /**
      * Add union
      *
      * @param QueryBuilderHandler $query
@@ -1443,7 +1373,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     {
         $statements = $query->getStatements();
 
-        if (\count($statements['unions']) > 0) {
+        if (count($statements['unions']) > 0) {
             $this->statements['unions'] = $statements['unions'];
             unset($statements['unions']);
             $query->setStatements($statements);
@@ -1458,25 +1388,32 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Returns statements
+     * Update key/value array
      *
-     * @return array
-     */
-    public function getStatements(): array
-    {
-        return $this->statements;
-    }
-
-    /**
-     * @param array $statements
+     * @param array $data
      *
-     * @return static $this
+     * @throws Exception
+     *
+     * @return \PDOStatement
      */
-    public function setStatements(array $statements)
+    public function update(array $data): PDOStatement
     {
-        $this->statements = $statements;
+        /**
+         * @var $response \PDOStatement
+         */
+        $queryObject = $this->getQuery('update', $data);
 
-        return $this;
+        $this->connection->setLastQuery($queryObject);
+
+        $this->fireEvents(EventHandler::EVENT_BEFORE_UPDATE, $queryObject);
+
+        [$response, $executionTime] = $this->statement($queryObject->getSql(), $queryObject->getBindings());
+
+        $this->fireEvents(EventHandler::EVENT_AFTER_UPDATE, $queryObject, [
+            'execution_time' => $executionTime,
+        ]);
+
+        return $response;
     }
 
     /**
@@ -1498,46 +1435,27 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Update key/value array
+     * Adds WHERE statement to the current query.
      *
-     * @param array $data
+     * @param string|Raw|\Closure     $key
+     * @param string|null             $operator
+     * @param mixed|Raw|\Closure|null $value
      *
-     * @throws Exception
-     *
-     * @return \PDOStatement
+     * @return static
      */
-    public function update(array $data): \PDOStatement
+    public function where($key, $operator = null, $value = null): IQueryBuilderHandler
     {
-        /**
-         * @var $response \PDOStatement
-         */
-        $queryObject = $this->getQuery('update', $data);
+        // If two params are given then assume operator is =
+        if (2 === func_num_args()) {
+            $value    = $operator;
+            $operator = '=';
+        }
 
-        $this->connection->setLastQuery($queryObject);
+        if (true === is_bool($value)) {
+            $value = (int)$value;
+        }
 
-        $this->fireEvents(EventHandler::EVENT_BEFORE_UPDATE, $queryObject);
-
-        [$response, $executionTime] = $this->statement($queryObject->getSql(), $queryObject->getBindings());
-
-        $this->fireEvents(EventHandler::EVENT_AFTER_UPDATE, $queryObject, [
-            'execution_time' => $executionTime,
-        ]);
-
-        return $response;
-    }
-
-    /**
-     * Insert key/value array
-     *
-     * @param array $data
-     *
-     * @throws Exception
-     *
-     * @return array|string
-     */
-    public function insert(array $data)
-    {
-        return $this->doInsert($data, 'insert');
+        return $this->whereHandler($key, $operator, $value);
     }
 
     /**
@@ -1579,7 +1497,7 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     public function whereNot($key, $operator = null, $value = null): IQueryBuilderHandler
     {
         // If two params are given then assume operator is =
-        if (2 === \func_num_args()) {
+        if (2 === func_num_args()) {
             $value    = $operator;
             $operator = '=';
         }
@@ -1625,65 +1543,161 @@ class QueryBuilderHandler implements IQueryBuilderHandler
     }
 
     /**
-     * Returns all columns in current query
+     * Add new statement to statement-list
      *
-     * @return array
+     * @param string       $key
+     * @param string|array $value
+     *
+     * @return void
      */
-    public function getColumns(): array
+    protected function addStatement(string $key, $value): void
     {
-        $tSelects = true === isset($this->statements['selects']) ? $this->statements['selects'] : [];
-        $tColumns = [];
-        foreach ($tSelects as $key => $value) {
-            if (\is_string($value)) {
-                if (\is_int($key)) {
-                    $tElements = explode('.', $value);
-                    if (!\in_array('*', $tElements, true)) {
-                        $tColumns[$tElements[1] ?? $tElements[0]] = $value;
-                    }
-                } elseif (\is_string($key)) {
-                    $tColumns[$value] = $key;
-                }
-            }
+        if (false === array_key_exists($key, $this->statements)) {
+            $this->statements[$key] = (array)$value;
+        } else {
+            $this->statements[$key] = array_merge($this->statements[$key], (array)$value);
+        }
+    }
+
+    /**
+     * Performs special queries like COUNT, SUM etc based on the current query.
+     *
+     * @param string $type
+     * @param string $field
+     *
+     * @throws Exception
+     *
+     * @return float
+     */
+    protected function aggregate(string $type, string $field = '*'): float
+    {
+        // Verify that field exists
+        if ('*' !== $field && true === isset($this->statements['selects']) && false === in_array($field, $this->statements['selects'], true)) {
+            throw new ColumnNotFoundException(sprintf('Failed to count query - the column %s hasn\'t been selected in the query.', $field));
         }
 
-        return $tColumns;
+        if (false === isset($this->statements['tables'])) {
+            throw new Exception('No table selected');
+        }
+
+        $count = $this
+            ->table($this->subQuery($this, 'count'))
+            ->select([$this->raw(sprintf('%s(%s) AS %s', strtoupper($type), $field, $this->adapterInstance->wrapSanitizer('field')))])
+            ->first()
+        ;
+
+        return true === isset($count->field) ? (float)$count->field : 0;
     }
 
     /**
-     * Returns boolean value indicating if overwriting is enabled or disabled in QueryBuilderHandler.
+     * Performs insert
      *
-     * @return bool
+     * @param array  $data
+     * @param string $type
+     *
+     * @throws Exception
+     *
+     * @return array|string|null
      */
-    public function isOverwriteEnabled(): bool
+    private function doInsert(array $data, string $type)
     {
-        return $this->overwriteEnabled;
+        // Insert single item
+
+        if (false === is_array(current($data))) {
+            $queryObject = $this->getQuery($type, $data);
+
+            $this->connection->setLastQuery($queryObject);
+
+            $this->fireEvents(EventHandler::EVENT_BEFORE_INSERT, $queryObject);
+            /**
+             * @var $result        \PDOStatement
+             * @var $executionTime float
+             */
+            [$result, $executionTime] = $this->statement($queryObject->getSql(), $queryObject->getBindings());
+
+            $insertId = 1 === $result->rowCount() ? $this->pdo()->lastInsertId() : null;
+            $this->fireEvents(EventHandler::EVENT_AFTER_INSERT, $queryObject, [
+                'insert_id'      => $insertId,
+                'execution_time' => $executionTime,
+            ]);
+
+            return $insertId;
+        }
+
+        $insertIds = [];
+
+        // If the current batch insert is not in a transaction, we create one...
+
+        if (false === $this->pdo()->inTransaction()) {
+            $this->transaction(function (Transaction $transaction) use (&$insertIds, $data, $type) {
+                foreach ($data as $subData) {
+                    $insertIds[] = $transaction->doInsert($subData, $type);
+                }
+            });
+
+            return $insertIds;
+        }
+
+        // Otherwise insert one by one...
+        foreach ($data as $subData) {
+            $insertIds[] = $this->doInsert($subData, $type);
+        }
+
+        return $insertIds;
     }
 
     /**
-     * If enabled calling from, select etc. will overwrite any existing values from previous calls in query.
+     * Parse parameter type from value
      *
-     * @param bool $enabled
+     * @param mixed $value
+     *
+     * @return int
+     */
+    protected function parseParameterType($value): int
+    {
+        if (null === $value) {
+            return PDO::PARAM_NULL;
+        }
+
+        if (true === is_int($value) || true === is_bool($value)) {
+            return PDO::PARAM_INT;
+        }
+
+        return PDO::PARAM_STR;
+    }
+
+    /**
+     * Handles where statements
+     *
+     * @param string|Raw|\Closure      $key
+     * @param string|null              $operator
+     * @param string|Raw|\Closure|null $value
+     * @param string                   $joiner
      *
      * @return static
      */
-    public function setOverwriteEnabled(bool $enabled)
+    protected function whereHandler($key, ?string $operator = null, $value = null, $joiner = 'AND'): IQueryBuilderHandler
     {
-        $this->overwriteEnabled = $enabled;
+        $key                          = $this->addTablePrefix($key);
+        $this->statements['wheres'][] = compact('key', 'operator', 'value', 'joiner');
 
         return $this;
     }
 
-    public function __destruct()
-    {
-        $this->close();
-    }
-
     /**
-     * Close connection
+     * Handles WHERE NULL statements.
+     *
+     * @param string|Raw|\Closure $key
+     * @param string              $prefix
+     * @param string              $operator
+     *
+     * @return static
      */
-    public function close(): void
+    protected function whereNullHandler($key, string $prefix = '', string $operator = ''): IQueryBuilderHandler
     {
-        $this->pdoStatement = null;
-        $this->connection   = null;
+        $key    = $this->adapterInstance->wrapSanitizer($this->addTablePrefix($key));
+        $prefix = ('' !== $prefix) ? $prefix . ' ' : $prefix;
+
+        return $this->{$operator . 'Where'}($this->raw("$key IS {$prefix}null"));
     }
 }
