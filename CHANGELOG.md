@@ -6,9 +6,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-[4.11.1] - 2020-09-24
+[5.0.0] - 2020-09-24
 ### Added:
 - changelog file
+### Changed:
+- php 7.2 required
 ### Fixed:
 - sanitize for PGSQL
 
