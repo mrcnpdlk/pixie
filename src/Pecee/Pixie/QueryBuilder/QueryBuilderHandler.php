@@ -1698,6 +1698,6 @@ class QueryBuilderHandler implements IQueryBuilderHandler
         $key    = $this->adapterInstance->wrapSanitizer($this->addTablePrefix($key));
         $prefix = ('' !== $prefix) ? $prefix . ' ' : $prefix;
 
-        return $this->{$operator . 'Where'}($this->raw("$key IS {$prefix}NULL"));
+        return $this->{$operator . 'Where'}($this->raw("$key IS {$prefix}null"));
     }
 }

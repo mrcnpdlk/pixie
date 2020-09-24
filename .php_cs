@@ -27,7 +27,7 @@ $finder = (new Finder())
     ->files()
     ->name('*.php')
     ->in(__DIR__ . '/src')
-    #->in(__DIR__ . '/tests')
+    ->in(__DIR__ . '/tests')
 ;
 return (new Config('pixie'))
     ->setRiskyAllowed(true)
