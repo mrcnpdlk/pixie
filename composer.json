@@ -18,6 +18,11 @@
   "minimum-stability": "stable",
   "authors": [
     {
+      "name": "Marcin Pudełek",
+      "email": "mrcnpdlk@gmail.com",
+      "role": "Developer"
+    },
+    {
       "name": "Simon Sessingø",
       "email": "simon.sessingoe@gmail.com",
       "role": "Developer"
@@ -30,11 +35,6 @@
     {
       "name": "Pavel Puchkin",
       "email": "i@neoascetic.me",
-      "role": "Developer"
-    },
-    {
-      "name": "Marcin Pudełek",
-      "email": "mrcnpdlk@gmail.com",
       "role": "Developer"
     }
   ],
