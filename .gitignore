@@ -4,6 +4,7 @@ composer.phar
 /devel/
 /coverage.clover
 .idea/
+.php_cs.cache
 
 ### Composer template
 /vendor/
