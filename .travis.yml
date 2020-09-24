@@ -27,6 +27,7 @@ before_script:
   - ls -al
 
 script:
+  - composer phpstan
   - ./vendor/bin/phpunit --coverage-clover _clover/clover.xml
 
 install:
