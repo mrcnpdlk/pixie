@@ -2,6 +2,8 @@
 
 namespace Pecee\Pixie\QueryBuilder;
 
+use function is_array;
+use function is_string;
 use Pecee\Pixie\Connection;
 
 /**
@@ -76,21 +78,21 @@ class QueryObject
      *
      * @return string The interpolated query
      */
-    protected function interpolateQuery($query, $params): string
+    protected function interpolateQuery(string $query, array $params): string
     {
         $keys   = [];
         $values = $params;
 
         // build a regular expression for each parameter
         foreach ($params as $key => $value) {
-            $keys[] = '/' . (\is_string($key) ? ':' . $key : '[?]') . '/';
+            $keys[] = '/' . (is_string($key) ? ':' . $key : '[?]') . '/';
 
-            if (true === \is_string($value)) {
+            if (true === is_string($value)) {
                 $values[$key] = $this->connection->getPdoInstance()->quote($value);
                 continue;
             }
 
-            if (true === \is_array($value)) {
+            if (true === is_array($value)) {
                 $values[$key] = $this->connection->getPdoInstance()->quote(implode(',', $value));
                 continue;
             }
