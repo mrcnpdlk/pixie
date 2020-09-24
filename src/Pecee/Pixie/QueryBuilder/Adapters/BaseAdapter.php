@@ -522,9 +522,9 @@ abstract class BaseAdapter
                     $prefix = $statements['aliases'][$table] ?? null;
 
                     if ($prefix !== null) {
-                        $t = sprintf('`%s` AS `%s`', $table, strtolower($prefix));
+                        $t = sprintf('%s%s%s AS %s%s%s', static::SANITIZER,$table, static::SANITIZER,static::SANITIZER,strtolower($prefix),static::SANITIZER);
                     } else {
-                        $t = sprintf('`%s`', $table);
+                        $t = sprintf('%s%s%s',static::SANITIZER, $table, static::SANITIZER);
                     }
                 }
 
